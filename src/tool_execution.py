@@ -1154,7 +1154,7 @@ async def execute_tool_block(
         do_tail_serve_output,
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
-        do_list_cookbook_servers,
+        do_list_cookbook_servers, do_wake_server,
         do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
@@ -1400,6 +1400,9 @@ async def execute_tool_block(
     elif tool == "list_cookbook_servers":
         desc = "list_cookbook_servers"
         result = await do_list_cookbook_servers(content, owner=owner)
+    elif tool == "wake_server":
+        desc = "wake_server"
+        result = await do_wake_server(content, owner=owner)
     elif tool == "edit_image":
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)

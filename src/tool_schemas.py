@@ -870,8 +870,24 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_cookbook_servers",
-            "description": "List the cookbook's configured servers (remote GPU boxes + local) and the current default host. Call this before download_model/serve_model when the user didn't specify a host, so models go to the right machine (where the GPUs and model cache are) instead of localhost. If multiple servers and intent is ambiguous, show them and ask the user which.",
+            "description": "List the cookbook's configured servers (remote GPU boxes + local) and the current default host. Shows each server's live status: [online], [booting], [offline, WoL available], or [offline]. Call this before download_model/serve_model when the user didn't specify a host, so models go to the right machine (where the GPUs and model cache are) instead of localhost. If multiple servers and intent is ambiguous, show them and ask the user which.",
             "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wake_server",
+            "description": "Wake a sleeping LAN server via Wake-on-LAN magic packet. Use when list_cookbook_servers shows a host as [offline, WoL available]. Sends the magic packet, then polls until the host and its service port respond (up to ~90s). Returns success once the service is ready.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "description": "Server name from list_cookbook_servers (e.g. 'Desktop', 'gpu-box')."},
+                    "timeout": {"type": "number", "description": "Max seconds to wait for the host to come online (default 90)."},
+                    "port": {"type": "number", "description": "Service port to probe for readiness (e.g. 11434 for Ollama). If omitted, uses the server's configured probe_port."}
+                },
+                "required": ["host"]
+            }
         }
     },
     {

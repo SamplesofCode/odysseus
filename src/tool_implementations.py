@@ -2528,6 +2528,9 @@ async def _cookbook_servers() -> Dict[str, Any]:
                 "env": s.get("env") or "",
                 "envPath": s.get("envPath") or "",
                 "port": s.get("port") or "",
+                "mac": s.get("mac") or "",
+                "broadcast": s.get("broadcast") or "",
+                "probe_port": s.get("probe_port") or "",
             })
     return {"default_host": env.get("remoteHost") or "", "hosts": hosts}
 
@@ -3685,7 +3688,36 @@ async def do_list_cookbook_servers(content: str, owner: Optional[str] = None) ->
     default = servers.get("default_host") or ""
     if not hosts:
         return {"output": "No cookbook servers configured. Downloads/serves default to localhost.", "servers": [], "default_host": "", "exit_code": 0}
-    # Resolve which server is the default by its friendly name too.
+
+    # Probe each remote host for online/offline status.
+    from src.wol import check_arp, check_port
+
+    async def _probe(h):
+        raw = h.get("host") or ""
+        if not raw:
+            return "local"
+        ip = raw.split("@")[-1] if "@" in raw else raw
+        pp = h.get("probe_port")
+        port = int(pp) if pp else None
+        if port and await check_port(ip, port):
+            return "online"
+        if await check_arp(ip):
+            return "booting" if port else "online"
+        return "wol" if h.get("mac") else "offline"
+
+    import asyncio as _aio
+    statuses = await _aio.gather(*[_probe(h) for h in hosts])
+    for h, st in zip(hosts, statuses):
+        h["status"] = st
+
+    _STATUS_LABEL = {
+        "local": "",
+        "online": " [online]",
+        "booting": " [booting]",
+        "wol": " [offline, WoL available]",
+        "offline": " [offline]",
+    }
+
     default_name = next((h.get("name") for h in hosts if h.get("host") == default and h.get("name")), default or "local")
     lines = [f"{len(hosts)} configured server(s) (default: {default_name}):"]
     for h in hosts:
@@ -3694,9 +3726,54 @@ async def do_list_cookbook_servers(content: str, owner: Optional[str] = None) ->
         mark = " ← default" if h.get("host") == default else ""
         env_bit = f" [{h.get('env')}: {h.get('envPath')}]" if h.get("env") and h.get("env") != "none" else ""
         plat = f" ({h.get('platform')})" if h.get("platform") else ""
-        lines.append(f"- {name} → {host}{plat}{env_bit}{mark}")
+        status = _STATUS_LABEL.get(h.get("status", ""), "")
+        lines.append(f"- {name} → {host}{plat}{env_bit}{status}{mark}")
     lines.append("\nRefer to servers by their name (e.g. download_model with host=\"gpu-box\").")
     return {"output": "\n".join(lines), "servers": hosts, "default_host": default, "exit_code": 0}
+
+
+async def do_wake_server(content: str, owner: Optional[str] = None) -> Dict:
+    """Wake a sleeping LAN server via Wake-on-LAN magic packet."""
+    args = _parse_tool_args(content)
+    host_name = (args.get("host") or "").strip()
+    if not host_name:
+        return {"error": "host is required (use a name from list_cookbook_servers).", "exit_code": 1}
+
+    servers = await _cookbook_servers()
+    target = None
+    for h in (servers.get("hosts") or []):
+        if (h.get("name") or "").lower() == host_name.lower() or h.get("host") == host_name:
+            target = h
+            break
+    if not target:
+        return {"error": f"Server {host_name!r} not found. Run list_cookbook_servers to see available hosts.", "exit_code": 1}
+
+    mac = target.get("mac")
+    if not mac:
+        return {"error": f"Server {host_name!r} has no MAC address configured. Add a 'mac' field to this server in Cookbook Settings.", "exit_code": 1}
+
+    raw_host = target.get("host") or ""
+    ip = raw_host.split("@")[-1] if "@" in raw_host else raw_host
+    if not ip:
+        return {"error": "Cannot determine IP for this server.", "exit_code": 1}
+
+    broadcast = target.get("broadcast") or "255.255.255.255"
+    timeout = float(args.get("timeout", 90))
+    port_arg = args.get("port")
+    probe_port = int(port_arg) if port_arg else (int(target.get("probe_port")) if target.get("probe_port") else None)
+
+    from src.wol import send_wol, wait_for_host
+    send_wol(mac, broadcast=broadcast)
+
+    result = await wait_for_host(ip, mac=mac, broadcast=broadcast, port=probe_port, timeout=timeout)
+    name = target.get("name") or host_name
+    if result == "online":
+        return {"output": f"{name} is online ({ip}). You can now serve_model or download_model to it.", "exit_code": 0}
+    elif result == "booting":
+        svc = f" (port {probe_port})" if probe_port else ""
+        return {"output": f"{name} ({ip}) is booting — host is on the network but the service{svc} isn't ready yet. Try again in a minute, or check that the service auto-starts on boot.", "exit_code": 0}
+    else:
+        return {"error": f"Sent WoL to {mac} but {name} ({ip}) did not respond within {int(timeout)}s. Check: BIOS WoL enabled, NIC power management 'Allow magic packet to wake', and that both machines are on the same subnet.", "exit_code": 1}
 
 
 async def do_list_serve_presets(content: str, owner: Optional[str] = None) -> Dict:
