@@ -1,0 +1,50 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allow manual trigger from Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/pewdiepie-archdaemon/odysseus.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Rebase onto upstream/main
+        run: |
+          git checkout main
+          # Attempt rebase; if conflicts arise, abort and fall back to
+          # a hard reset so the workflow never gets stuck.
+          if ! git rebase upstream/main; then
+            echo "::warning::Rebase had conflicts — resetting to upstream/main"
+            git rebase --abort
+            # Preserve fork-only files (this workflow) by stashing first
+            cp .github/workflows/sync-upstream.yml /tmp/sync-upstream.yml
+            git reset --hard upstream/main
+            cp /tmp/sync-upstream.yml .github/workflows/sync-upstream.yml
+            git add .github/workflows/sync-upstream.yml
+            git commit -m "ci: re-apply fork sync workflow after conflict reset"
+          fi
+
+      - name: Force push rebased main
+        run: git push origin main --force-with-lease
