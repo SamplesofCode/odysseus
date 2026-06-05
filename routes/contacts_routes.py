@@ -519,12 +519,29 @@ def _import_csv_contacts(text: str) -> Dict:
                 or lowered.get("display name") or lowered.get("display_name")
                 or lowered.get("fn") or ""
             )
+            # Google Contacts CSV: "First Name" / "Last Name" columns
+            if not name:
+                first = lowered.get("first name") or lowered.get("given name") or ""
+                last = lowered.get("last name") or lowered.get("family name") or ""
+                name = f"{first} {last}".strip()
             email = (
                 lowered.get("email") or lowered.get("email address")
                 or lowered.get("email_address") or lowered.get("e-mail")
                 or lowered.get("mail") or ""
             )
+            # Google Contacts CSV: "E-mail 1 - Value", "E-mail 2 - Value", etc.
+            if not email:
+                for k, v in lowered.items():
+                    if k.startswith("e-mail") and k.endswith("value") and v:
+                        email = v
+                        break
             phone = lowered.get("phone") or lowered.get("telephone") or lowered.get("tel") or ""
+            # Google Contacts CSV: "Phone 1 - Value", "Phone 2 - Value", etc.
+            if not phone:
+                for k, v in lowered.items():
+                    if k.startswith("phone") and k.endswith("value") and v:
+                        phone = v
+                        break
             rows.append((name, email, phone))
     else:
         stream.seek(0)

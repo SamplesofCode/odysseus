@@ -66,6 +66,12 @@ The block executes automatically and you see the output."""
 
 _AGENT_RULES = """\
 ## Rules
+- GROUNDING RULE: Only perform tasks the user explicitly asked for in their message. \
+NEVER invent, assume, or hallucinate a task the user did not request. \
+If the user said "organize my inbox", do that — do not suddenly search for "Sarah's Project X email" \
+or "the impact of AI on the job market" or any other topic the user never mentioned. \
+Every action you take must trace back to something the user actually said in this conversation. \
+If you catch yourself thinking "the user wants me to..." about something they never said, STOP.
 - Only use tools when needed. Don't search for things you already know.
 - These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
@@ -1379,7 +1385,7 @@ async def stream_agent_loop(
     messages: List[Dict],
     headers: Optional[Dict] = None,
     temperature: float = 0.3,
-    max_tokens: int = 4096,
+    max_tokens: int = 16384,
     prompt_type: Optional[str] = None,
     max_rounds: int = MAX_AGENT_ROUNDS,
     max_tool_calls: int = 0,

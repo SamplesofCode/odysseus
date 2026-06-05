@@ -570,7 +570,10 @@ class McpManager:
         if not tools:
             return ""
 
-        lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        lines = ["\n\nYou also have access to external MCP tool servers. "
+                 "Call these tools the same way as built-in tools — write a fenced code block with the tool's qualified name as the language tag, "
+                 "and put the JSON arguments inside the block. Do NOT call them as Python functions. Example:\n"
+                 "```mcp__serverid__tool_name\n{\"param\": \"value\"}\n```"]
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt
