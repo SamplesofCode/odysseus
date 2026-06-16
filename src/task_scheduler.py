@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
+from core.auth import RESERVED_USERNAMES
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,6 +236,29 @@ def _digest_windows(now):
         ("this_week", now + timedelta(days=2), now + timedelta(days=7)),
         ("next_30_days", now + timedelta(days=7), now + timedelta(days=30)),
     ]
+
+
+def _checkin_calendar_events(db, owner, start, end):
+    """Calendar events in [start, end] for ONE owner, for the check-in digest.
+
+    Ownership lives on CalendarCal.owner; events inherit it via calendar_id.
+    The digest query had no owner scope, so it pulled EVERY user's events into
+    one user's check-in (a cross-tenant leak of summaries/locations). Scope it
+    by joining CalendarCal, mirroring routes/calendar_routes.list_events.
+    """
+    from core.database import CalendarEvent as _CE, CalendarCal as _CC
+    return (
+        db.query(_CE)
+        .join(_CC, _CE.calendar_id == _CC.id)
+        .filter(
+            _CC.owner == owner,
+            _CE.dtstart >= start,
+            _CE.dtstart <= end,
+            _CE.status != "cancelled",
+        )
+        .order_by(_CE.dtstart)
+        .all()
+    )
 
 
 class TaskScheduler:
@@ -1098,7 +1123,7 @@ class TaskScheduler:
                                endpoint_url: str, model: str) -> str:
         """Gather raw data from all integrations, hand it to the LLM to write the check-in."""
         from src.tool_implementations import do_manage_notes
-        from src.agent_tools import get_mcp_manager
+        from src.tool_utils import get_mcp_manager
 
         tz_name = _resolve_task_timezone(db, task)
         try:
@@ -1127,11 +1152,7 @@ class TaskScheduler:
                     # Strip timezone for naive DB comparison
                     _s = start.replace(tzinfo=None) if start.tzinfo else start
                     _e = end.replace(tzinfo=None) if end.tzinfo else end
-                    evs = _db.query(_CE).filter(
-                        _CE.dtstart >= _s,
-                        _CE.dtstart <= _e,
-                        _CE.status != "cancelled",
-                    ).order_by(_CE.dtstart).all()
+                    evs = _checkin_calendar_events(_db, task.owner, _s, _e)
                     if not evs:
                         continue
                     # Group by importance for richer output
@@ -1324,7 +1345,10 @@ class TaskScheduler:
             db.commit()
             if self._session_manager:
                 try:
-                    self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
+                    self._session_manager.ensure_task_session(
+                        session_id, f"[Task] {task.name}", endpoint_url, model,
+                        owner=task.owner, task=task
+                    )
                 except Exception:
                     pass
 
@@ -1335,11 +1359,24 @@ class TaskScheduler:
             return await self._execute_checkin(task, crew, db, session_id, endpoint_url, model)
 
         # Build system prompt: crew member persona overrides the default.
+        # Built-in character_id (Socrates, Razor, etc.) further biases the
+        # voice — it prepends to whichever base prompt we landed on so the
+        # task still knows it's executing a scheduled task but in that
+        # character's tone.
         system_prompt = (
             (crew.personality or "").strip()
             if crew and crew.personality
             else "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         )
+        char_id = (getattr(task, "character_id", None) or "").strip()
+        if char_id:
+            try:
+                from src.reminder_personas import PERSONAS as _PERSONAS
+                char_prompt = _PERSONAS.get(char_id.lower())
+                if char_prompt:
+                    system_prompt = f"{char_prompt}\n\n{system_prompt}"
+            except Exception:
+                pass
         # Inject current time so the model knows what's past vs upcoming
         tz_name = _resolve_task_timezone(db, task)
         try:
@@ -1417,6 +1454,7 @@ class TaskScheduler:
         task's visible output target.
         """
         from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.models import ChatMessage as MemChatMessage
 
         output = task.output_target or "session"
         if (
@@ -1473,7 +1511,10 @@ class TaskScheduler:
             db.commit()
             if self._session_manager:
                 try:
-                    self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
+                    self._session_manager.ensure_task_session(
+                        session_id, f"[Task] {task.name}", endpoint_url, model_name,
+                        owner=task.owner, task=task
+                    )
                 except Exception:
                     pass
 
@@ -1482,36 +1523,50 @@ class TaskScheduler:
             meta["model"] = model_name
         if crew and crew.is_default_assistant:
             meta.update({"source": "cron", "task_id": task.id, "task_name": task.name})
-        msg_meta = json.dumps(meta)
-        user_content = task.prompt or f"[Task] {task.name}"
-        user_msg = ChatMessage(
-            id=str(uuid.uuid4()),
-            session_id=session_id,
-            role="user",
-            content=user_content,
-            timestamp=_utcnow(),
-            meta_data=msg_meta,
-        )
-        assistant_msg = ChatMessage(
-            id=str(uuid.uuid4()),
-            session_id=session_id,
-            role="assistant",
-            content=result or "",
-            timestamp=_utcnow(),
-            meta_data=msg_meta,
-        )
-        db.add(user_msg)
-        db.add(assistant_msg)
-        db.commit()
 
-        if self._session_manager:
+        # Use SessionManager for persistence so in-memory cache stays in sync
+        if self._session_manager and session_id:
             try:
-                from core.models import ChatMessage as MemMsg
-                sess_obj = self._session_manager.get_session(session_id)
-                sess_obj.history.append(MemMsg(role="user", content=user_msg.content, metadata=meta))
-                sess_obj.history.append(MemMsg(role="assistant", content=assistant_msg.content, metadata=meta))
+                self._session_manager.add_message(
+                    session_id,
+                    MemChatMessage(
+                        "user",
+                        task.prompt or f"[Task] {task.name}",
+                        metadata=dict(meta),
+                    ),
+                )
+                self._session_manager.add_message(
+                    session_id,
+                    MemChatMessage(
+                        "assistant",
+                        result or "",
+                        metadata=dict(meta),
+                    ),
+                )
             except Exception:
-                pass
+                logger.exception("Failed to deliver task %s through SessionManager", task.id)
+        else:
+            # Fallback: raw DB write (no session manager available)
+            msg_meta = json.dumps(meta)
+            user_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="user",
+                content=task.prompt or f"[Task] {task.name}",
+                timestamp=_utcnow(),
+                meta_data=msg_meta,
+            )
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="assistant",
+                content=result or "",
+                timestamp=_utcnow(),
+                meta_data=msg_meta,
+            )
+            db.add(user_msg)
+            db.add(assistant_msg)
+            db.commit()
 
     @staticmethod
     def _is_email_output_target(output: str) -> bool:
@@ -1628,6 +1683,8 @@ class TaskScheduler:
                     data = json.loads(event_str[6:])
                     # Capture text from all event types, not just delta
                     if "delta" in data:
+                        if data.get("thinking"):
+                            continue
                         full_text += data["delta"]
                     elif data.get("type") == "tool_output":
                         # Tool results — capture summary so we have SOMETHING even
@@ -1854,7 +1911,7 @@ class TaskScheduler:
         have to special-case each tool's schema; the MCP tool ignores keys it
         doesn't recognise.
         """
-        from src.agent_tools import get_mcp_manager
+        from src.tool_utils import get_mcp_manager
         mcp = get_mcp_manager()
         if not mcp:
             logger.warning(f"Task {task.id}: MCP manager not available for delivery")
@@ -2166,7 +2223,7 @@ class TaskScheduler:
         # check-ins seeded, which then double-fire alongside the human user's
         # check-ins. This was the root cause of the duplicate 'Morning check-in'
         # rows we had to manually clean up.
-        if not owner or owner in {"internal-tool", "api", "demo", "system"}:
+        if not owner or owner in RESERVED_USERNAMES:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
         from core.database import SessionLocal, CrewMember, ScheduledTask
