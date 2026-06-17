@@ -86,6 +86,13 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("email", "check inbox request", r"\bcheck\s+(?:my\s+)?(?:email|inbox|mail)\b"),
         ("email", "unread email request", r"\bunread\s+(?:email|mail)s?\b"),
 
+        # Outlook / email organization actions (MCP tools).
+        ("email", "outlook access request", rf"{_ACTION_QUESTION}(?:access|check|read|open|use|connect\s+to)\b.{{0,40}}\boutlook\b"),
+        ("email", "outlook action request", rf"{_PLEASE}(?:organize|sort|clean\s+up|categorize)\s+(?:my\s+)?(?:outlook|inbox|emails?)\b"),
+        ("email", "outlook mention request", r"\boutlook\b.{0,60}\b(?:inbox|email|folder|rule|organiz)\b"),
+        ("email", "email rules request", r"\b(?:email|inbox|outlook)\s+rules?\b"),
+        ("email", "auto-sort request", r"\bauto.?sort\b"),
+
         # UI/control-plane actions that should open panels or flip toggles.
         ("ui", "open/show panel request", rf"{_PLEASE}(?:open|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?{_PANEL}\b"),
         ("ui", "tool or feature toggle request", r"\b(?:disable|enable|turn\s+(?:on|off))\s+(?:the\s+)?(?:shell|search|web|browser|documents?|memory|skills|images?|calendar|email|mail|research|incognito)\b"),

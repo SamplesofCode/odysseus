@@ -765,6 +765,7 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    tools: Optional[List[Dict]] = None,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input
 
@@ -781,6 +782,19 @@ def _build_chatgpt_responses_payload(
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
+    # Convert OpenAI Chat Completions tool schemas to Responses API format
+    if tools:
+        resp_tools = []
+        for t in tools:
+            func = t.get("function") or {}
+            resp_tools.append({
+                "type": "function",
+                "name": func.get("name", ""),
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters", {}),
+            })
+        if resp_tools:
+            payload["tools"] = resp_tools
     return payload
 
 
@@ -1731,7 +1745,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
     else:
         target_url = url
         payload = {
@@ -1777,6 +1791,14 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         event_name = ""
         input_tokens = 0
         output_tokens = 0
+        # Accumulate function-call tool calls from the Responses API.
+        # The Responses API streams tool calls as:
+        #   response.output_item.added  (type=function_call, name, call_id)
+        #   response.function_call_arguments.delta  (delta: partial args)
+        #   response.function_call_arguments.done   (arguments: full args)
+        #   response.output_item.done   (marks item complete)
+        _resp_tc: Dict[str, Dict] = {}   # call_id → {id, name, arguments}
+        _resp_tc_current: str = ""        # call_id of the item currently streaming
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -1806,7 +1828,36 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         delta = data.get("delta") or ""
                         if delta:
                             yield f'data: {json.dumps({"delta": delta})}\n\n'
+                    # ── Tool call events (Responses API) ──
+                    elif evt == "response.output_item.added":
+                        item = data.get("item") or data
+                        if item.get("type") == "function_call":
+                            call_id = item.get("call_id") or item.get("id") or ""
+                            _resp_tc_current = call_id
+                            _resp_tc[call_id] = {
+                                "id": call_id,
+                                "name": item.get("name") or "",
+                                "arguments": "",
+                            }
+                    elif evt == "response.function_call_arguments.delta":
+                        delta = data.get("delta") or ""
+                        cid = data.get("call_id") or _resp_tc_current
+                        if cid in _resp_tc and delta:
+                            _resp_tc[cid]["arguments"] += delta
+                            # Stream doc-tool arg deltas for live preview
+                            tc_name = _resp_tc[cid].get("name", "")
+                            if tc_name in ("create_document", "update_document", "edit_document"):
+                                idx = list(_resp_tc).index(cid)
+                                yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": tc_name, "arg_delta": delta})}\n\n'
+                    elif evt == "response.function_call_arguments.done":
+                        cid = data.get("call_id") or _resp_tc_current
+                        if cid in _resp_tc:
+                            _resp_tc[cid]["arguments"] = data.get("arguments") or _resp_tc[cid]["arguments"]
                     elif evt == "response.completed":
+                        # Emit accumulated tool calls before DONE
+                        if _resp_tc:
+                            calls = list(_resp_tc.values())
+                            yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
@@ -1819,6 +1870,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                         text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
                         yield f'event: error\ndata: {json.dumps({"status": 502, "text": text})}\n\n'
                         return
+                # End of stream without response.completed
+                if _resp_tc:
+                    calls = list(_resp_tc.values())
+                    yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)

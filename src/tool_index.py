@@ -498,6 +498,27 @@ class ToolIndex:
         frozenset({"write a", "create a doc", "draft", "compose", "poem", "story",
                    "essay", "outline", "letter"}):
             {"create_document", "edit_document", "update_document"},
+        # Outlook MCP tools — organize inbox, manage server-side rules, auto-sort.
+        # These are MCP tools (bare names); the agent_loop MCP filter matches
+        # qualified names by their bare suffix so these work with any server ID.
+        frozenset({"outlook", "organize inbox", "sort inbox", "sort my email",
+                   "organize my email", "organize email", "email rules",
+                   "inbox rules", "email rule", "auto-sort", "auto sort",
+                   "categorize email", "email folders", "move emails",
+                   "bulk move", "clean up inbox", "clean inbox",
+                   "list emails", "read email", "search emails", "send email",
+                   "reply email", "mark read", "delete email", "attachments",
+                   "email categories", "create folder", "rename folder",
+                   "delete folder", "inbox", "unread", "hotmail"}):
+            {"outlook_auto_organize", "outlook_bulk_move", "outlook_list_rules",
+             "outlook_get_rule", "outlook_create_rule", "outlook_update_rule",
+             "outlook_delete_rule", "outlook_move_email", "outlook_list_folders",
+             "outlook_list_emails", "outlook_read_email", "outlook_search_emails",
+             "outlook_send_email", "outlook_reply", "outlook_mark_read",
+             "outlook_delete_email", "outlook_list_attachments",
+             "outlook_list_categories", "outlook_categorize_email",
+             "outlook_create_folder", "outlook_rename_folder",
+             "outlook_delete_folder"},
     }
 
     def get_tools_for_query(

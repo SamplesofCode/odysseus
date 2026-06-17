@@ -121,7 +121,25 @@ def open_browser(url):
     except Exception:
         pass
 
-    webbrowser.open(url)
+    # webbrowser.open() bypasses Chrome's PWA routing and always opens a new
+    # tab. Launch Chrome directly with --app= to get the standalone app window.
+    chrome_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.join(os.getenv("LOCALAPPDATA", ""), r"Google\Chrome\Application\chrome.exe"),
+    ]
+    launched = False
+    for chrome in chrome_paths:
+        if os.path.exists(chrome):
+            try:
+                import subprocess
+                subprocess.Popen([chrome, f"--app={url}"])
+                launched = True
+                break
+            except Exception:
+                pass
+    if not launched:
+        webbrowser.open(url)
 
 
 if __name__ == "__main__":

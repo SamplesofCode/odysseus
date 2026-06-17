@@ -300,16 +300,78 @@ def to_http_exception(exc: Exception) -> HTTPException:
 
 
 def build_responses_input(messages: list[dict]) -> list[dict]:
+    """Convert Chat Completions messages to Responses API input items.
+
+    Handles text messages, assistant tool_calls (→ function_call items),
+    and tool-role results (→ function_call_output items) so that multi-round
+    agent loops work correctly with the Responses API.
+    """
     input_items: list[dict] = []
     for msg in messages or []:
         role = msg.get("role") or "user"
+
+        # Assistant message with tool_calls → emit function_call items
+        # (and optionally any text content the assistant also produced)
+        if role == "assistant" and msg.get("tool_calls"):
+            # Emit text content first if present
+            content = msg.get("content")
+            if content:
+                text = _extract_text(content)
+                if text:
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    })
+            # Emit each tool call as a function_call item
+            for tc in msg["tool_calls"]:
+                func = tc.get("function") or {}
+                call_id = tc.get("id") or ""
+                arguments = func.get("arguments") or ""
+                # Ensure arguments is a string (some paths pass dicts)
+                if isinstance(arguments, dict):
+                    import json as _json
+                    arguments = _json.dumps(arguments)
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": func.get("name") or "",
+                    "arguments": arguments,
+                })
+            continue
+
+        # Tool result → function_call_output item
         if role == "tool":
-            role = "user"
+            call_id = msg.get("tool_call_id") or ""
+            content = msg.get("content")
+            text = _extract_text(content) if content else ""
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": text,
+            })
+            continue
+
+        # Regular text message (user or assistant)
         content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
-        else:
-            text = "" if content is None else str(content)
+        text = _extract_text(content)
         input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        input_items.append({
+            "type": "message",
+            "role": role,
+            "content": [{"type": input_type, "text": text}],
+        })
     return input_items
+
+
+def _extract_text(content) -> str:
+    """Extract plain text from Chat Completions content (string or list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text") or part.get("content") or "")
+            for part in content
+            if isinstance(part, dict)
+        )
+    return "" if content is None else str(content)
