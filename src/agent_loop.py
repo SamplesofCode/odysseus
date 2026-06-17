@@ -15,6 +15,7 @@ import logging
 from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
+from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
 from src.model_context import estimate_tokens
 from src.settings import get_setting
@@ -612,6 +613,7 @@ _API_HOSTS = frozenset([
     "api.perplexity.ai", "api.x.ai",
     "ollama.com", "api.venice.ai", "api.kimi.com",
     "api.githubcopilot.com",
+    "chatgpt.com",  # ChatGPT Subscription / Codex Responses API
     # Local OpenAI-compatible endpoints (llama.cpp, vLLM, LM Studio, etc.).
     # Without these, `_is_api_model` falls back to keyword sniffing on the
     # model name, so well-behaved local servers don't get native tool
@@ -2091,7 +2093,10 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
-    if _endpoint_supports is True:
+    # ChatGPT Subscription (Codex) always supports function calling via the
+    # Responses API — override any stale supports_tools=False in the database.
+    _is_chatgpt_sub = is_chatgpt_subscription_base(endpoint_url or "")
+    if _is_chatgpt_sub or _endpoint_supports is True:
         _is_api_model = True
     elif (
         _endpoint_supports is False
@@ -2305,6 +2310,7 @@ async def stream_agent_loop(
                 _mcp_filtered = [
                     s for s in mcp_schemas
                     if s.get("function", {}).get("name") in _relevant_tools
+                    or s.get("function", {}).get("name", "").split("__")[-1] in _relevant_tools
                 ]
                 all_tool_schemas = base_schemas + _mcp_filtered
             else:
@@ -2327,7 +2333,10 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
-        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        _mcp_names_sent = [n for n in _tool_names_sent if n.startswith("mcp__")]
+        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} mcp_tools={len(_mcp_names_sent)} mcp_available={len(mcp_schemas)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        if mcp_schemas and not _mcp_names_sent:
+            logger.warning(f"[agent-debug] MCP tools available ({len(mcp_schemas)}) but NONE sent to model! relevant_tools type={type(_relevant_tools)}, mcp_schema_names={[s.get('function',{}).get('name','')[:40] for s in mcp_schemas[:5]]}")
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
